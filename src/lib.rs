@@ -1,6 +1,6 @@
-use std::{fmt, ops::Mul};
+use std::{fmt, ops::{Mul, Add, Sub, Div}, cmp::Ordering};
 use ark_ec::{ProjectiveCurve, AffineCurve};
-use ark_ff::{Field, PrimeField};
+use ark_ff::{Field, PrimeField, Zero, One};
 use ark_bls12_381::{G1Projective as G, G1Affine as GAffine, Fr};
 use std::collections::hash_set::HashSet;
 
@@ -25,12 +25,14 @@ pub struct TPKECipherText {
 #[derive(Debug)]
 pub enum TPKEError {
     InvalidLength,
+    InvalidValue,
 }
 impl std::error::Error for TPKEError {}
 impl fmt::Display for TPKEError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TPKEError::InvalidLength => write!(f, "Invalid length"),
+            TPKEError::InvalidValue => write!(f, "Invalid value"),
         }
     }
 }
@@ -44,11 +46,49 @@ impl TPKEPublicKey {
         }
     }
 
-    fn lagrange(&self, indices: Vec<u32>, j: u32) -> Result<Fr, TPKEError> {
-        unimplemented!();
+    fn lagrange(&self, indices: Vec<u64>, j: u64) -> Result<Fr, TPKEError> {
+        if indices.len() != self.k as usize {
+            return Err(TPKEError::InvalidLength);
+        }
+        let mut sorted = indices.clone();
+        sorted.sort();
+        sorted.dedup();
+        if sorted.len() != indices.len() {
+            return Err(TPKEError::InvalidValue);
+        }
+        let mut contains_j = false;
+        for i in sorted.iter() {
+            if *i == j { contains_j = true; }
+            if i > &self.l {
+                return Err(TPKEError::InvalidValue);
+            }
+        }
+        if !contains_j {
+            return Err(TPKEError::InvalidValue);
+        }
+        let num = sorted.iter().map(|x| { 
+            match x.cmp(&j) {
+                Ordering::Equal => Fr::from(1),
+                _ => Fr::from(0).sub(Fr::from(*x as u128)).sub(Fr::from(1))
+            }
+        }).fold(Fr::from(1), |acc, x| {
+            acc.mul(x)
+        });
+
+        let den = sorted.iter().map(|x| { 
+            match x.cmp(&j) {
+                Ordering::Equal => Fr::from(1),
+                _ => Fr::from(j).sub(Fr::from(*x as u128))
+            }
+        }).fold(Fr::from(1), |acc, x| {
+            acc.mul(x)
+        });
+
+        Ok(num.div(den))
     }
 
-    fn encrypt(&self, m: &[u8]) -> TPKECipherText {
+    fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
+        if m.len() != 32 { return Err(TPKEError::InvalidLength); }
         unimplemented!();
     }
 
