@@ -1,14 +1,25 @@
 use std::{fmt, ops::{Mul, Add, Sub, Div}, cmp::Ordering};
+use ark_std::UniformRand;
 use ark_ec::{ProjectiveCurve, AffineCurve};
-use ark_ff::{Field, PrimeField, Zero, One};
-use ark_bls12_381::{G1Projective as G, G1Affine as GAffine, Fr};
+use ark_serialize::CanonicalSerialize;
+use ark_ff::{Field, PrimeField, Zero, One, FromBytes};
+use ark_bls12_381::{G1Projective as G1, G1Affine, G2Affine, G2Projective as G2, Fr};
 use std::collections::hash_set::HashSet;
+use sha2::Digest;
+
+fn sha256(b: &[u8]) -> Vec<u8> {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b);
+    hasher.finalize().to_vec()
+}
 
 pub struct TPKEPublicKey {
     l: u64,
     k: u64,
-    VK: G,
-    VKs: Vec<G>,
+    g1: G1,
+    g2: G2,
+    VK: G1,
+    VKs: Vec<G1>,
 }
 
 pub struct TPKEPrivateKey {
@@ -17,9 +28,9 @@ pub struct TPKEPrivateKey {
 }
 
 pub struct TPKECipherText {
-    U: G,
+    U: G1,
     V: Vec<u8>,
-    W: G
+    W: G2
 }
 
 #[derive(Debug)]
@@ -37,8 +48,13 @@ impl fmt::Display for TPKEError {
     }
 }
 impl TPKEPublicKey {
-    fn new(l: u64, k: u64, VK: G, VKs: &[G]) -> Self {
+    fn new(l: u64, k: u64, VK: G1, VKs: &[G1]) -> Self {
+        let g1 = G1::from(G1Affine::from_random_bytes(&sha256(b"bzte-g1")).unwrap());
+        let g2 = G2::from(G2Affine::from_random_bytes(&sha256(b"bzte-g2")).unwrap());
+
         Self {
+            g1: g1,
+            g2: g2,
             l: l,
             k: k,
             VK: VK,
@@ -86,10 +102,22 @@ impl TPKEPublicKey {
 
         Ok(num.div(den))
     }
-
     fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
         if m.len() != 32 { return Err(TPKEError::InvalidLength); }
-        unimplemented!();
+        let mut rng = rand::thread_rng();
+        let r = Fr::rand(&mut rng).into_repr();
+        let U = self.g1.mul(r);
+        let VKr = self.VK.mul(r);
+        let mut V = vec![0u8; 32];
+        VKr.serialize(&mut V).expect("deserialize error");
+        V = sha256(&V);
+        for i in 0..32 {
+            V[i] ^= m[i];
+        }
+        let W = hashH(U, &V).mul(r);
+        Ok(TPKECipherText {
+            U: U, V: V, W: W
+        })
     }
 
     fn verify_ciphertext(&self, c: TPKECipherText) -> bool {
@@ -112,9 +140,18 @@ impl TPKEPrivateKey {
         }
     }
 
-    fn decrypt_share(&self, c: TPKECipherText) -> G {
+    fn decrypt_share(&self, c: TPKECipherText) -> G1 {
         return  c.U.mul(&self.sk.into_repr());
     }
+}
+
+fn hashH(g: G1, x: &[u8]) -> G2 {
+    let mut serialized = Vec::new();
+    g.serialize(&mut serialized);
+    serialized.extend_from_slice(x);
+    G2::from(
+        G2Affine::from_random_bytes(&serialized).unwrap()
+        )
 }
 
 #[cfg(test)]
