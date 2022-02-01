@@ -1,15 +1,17 @@
-use std::{fmt, ops::{Mul, Add, Sub, Div}, cmp::Ordering};
+use std::{fmt, ops::{Mul, Add, Sub, Div}, cmp::Ordering, collections::HashMap};
 use ark_std::UniformRand;
 use ark_ec::{ProjectiveCurve, AffineCurve};
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_ff::{Field, PrimeField, Zero, One, FromBytes};
-use ark_bls12_381::{G1Projective as G1, G1Affine, G2Affine, G2Projective as G2, Fr};
+use ark_ec::PairingEngine;
+use ark_bls12_381::{
+    G1Projective as G1, 
+    G1Affine, G2Affine, 
+    G2Projective as G2, 
+    Fr,
+    Bls12_381};
 use std::collections::hash_set::HashSet;
 use sha2::Digest;
-use ark_crypto_primitives::crh::{
-        pedersen::{Window, CRH},
-            CRH as CRHScheme,
-};
 
 fn sha256(b: &[u8]) -> Vec<u8> {
     let mut hasher = sha2::Sha256::new();
@@ -21,7 +23,7 @@ fn sha256(b: &[u8]) -> Vec<u8> {
 fn hash_to_G1(b: &[u8]) -> G1 {
     let mut nonce = 0u32;
     loop {
-        let c = [b"bzte-domain-g1", b, &nonce.to_be_bytes()].concat();
+        let c = [b"bzte-domain-g1", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
         match G1Affine::from_random_bytes(&sha256(&c)) {
             Some(v) => return G1::from(v),
             None => nonce += 1
@@ -32,7 +34,7 @@ fn hash_to_G1(b: &[u8]) -> G1 {
 fn hash_to_G2(b: &[u8]) -> G2 {
     let mut nonce = 0u32;
     loop {
-        let c = [b"bzte-domain-g2", b, &nonce.to_be_bytes()].concat();
+        let c = [b"bzte-domain-g2", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
         match G2Affine::from_random_bytes(&sha256(&c)) {
             Some(v) => return G2::from(v),
             None => nonce += 1
@@ -41,20 +43,23 @@ fn hash_to_G2(b: &[u8]) -> G2 {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TPKEPublicKey {
     l: u64,
     k: u64,
     g1: G1,
     g2: G2,
-    VK: G1,
-    VKs: Vec<G1>,
+    VK: G2,
+    VKs: Vec<G2>,
 }
 
+#[derive(Debug)]
 pub struct TPKEPrivateKey {
     pk: TPKEPublicKey,
     sk: Fr,
 }
 
+#[derive(Debug, Clone)]
 pub struct TPKECipherText {
     U: G1,
     V: Vec<u8>,
@@ -65,6 +70,8 @@ pub struct TPKECipherText {
 pub enum TPKEError {
     InvalidLength,
     InvalidValue,
+    InvalidCiphertext,
+    InvalidShare
 }
 impl std::error::Error for TPKEError {}
 impl fmt::Display for TPKEError {
@@ -72,11 +79,13 @@ impl fmt::Display for TPKEError {
         match self {
             TPKEError::InvalidLength => write!(f, "Invalid length"),
             TPKEError::InvalidValue => write!(f, "Invalid value"),
+            TPKEError::InvalidCiphertext => write!(f, "Invalid ciphertext"),
+            TPKEError::InvalidShare => write!(f, "Invalid share"),
         }
     }
 }
 impl TPKEPublicKey {
-    fn new(l: u64, k: u64, VK: G1, VKs: &[G1]) -> Self {
+    pub fn new(l: u64, k: u64, VK: G2, VKs: &[G2]) -> Self {
         let g1 = hash_to_G1(b"bzte-g1");
         let g2 = hash_to_G2(b"bzte-g2");
 
@@ -90,11 +99,11 @@ impl TPKEPublicKey {
         }
     }
 
-    fn lagrange(&self, indices: Vec<u64>, j: u64) -> Result<Fr, TPKEError> {
+    fn lagrange(&self, indices: &[u64], j: u64) -> Result<Fr, TPKEError> {
         if indices.len() != self.k as usize {
             return Err(TPKEError::InvalidLength);
         }
-        let mut sorted = indices.clone();
+        let mut sorted = indices.to_vec();
         sorted.sort();
         sorted.dedup();
         if sorted.len() != indices.len() {
@@ -112,52 +121,83 @@ impl TPKEPublicKey {
         }
         let num = sorted.iter().map(|x| { 
             match x.cmp(&j) {
-                Ordering::Equal => Fr::from(1),
-                _ => Fr::from(0).sub(Fr::from(*x as u128)).sub(Fr::from(1))
+                Ordering::Equal => Fr::one(),
+                _ => Fr::one().sub(Fr::from(*x as u128)).sub(Fr::one())
             }
-        }).fold(Fr::from(1), |acc, x| {
+        }).fold(Fr::one(), |acc, x| {
             acc.mul(x)
         });
 
         let den = sorted.iter().map(|x| { 
             match x.cmp(&j) {
-                Ordering::Equal => Fr::from(1),
+                Ordering::Equal => Fr::one(),
                 _ => Fr::from(j).sub(Fr::from(*x as u128))
             }
-        }).fold(Fr::from(1), |acc, x| {
+        }).fold(Fr::one(), |acc, x| {
             acc.mul(x)
         });
 
         Ok(num.div(den))
     }
-    fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
+    pub fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
         if m.len() != 32 { return Err(TPKEError::InvalidLength); }
         let mut rng = rand::thread_rng();
         let r = Fr::rand(&mut rng).into_repr();
         let U = self.g1.mul(r);
         let VKr = self.VK.mul(r);
-        let mut V = vec![0u8; 32];
-        VKr.serialize(&mut V).expect("deserialize error");
+        let mut V = Vec::new();
+        VKr.serialize(&mut V).unwrap();
         V = sha256(&V);
         for i in 0..32 {
             V[i] ^= m[i];
         }
-        let W = hashH(U, &V).mul(r);
+        let h = hashH(U, &V);
+        let W = h.mul(r);
+        let p1 = Bls12_381::pairing(self.g1, W);
+        let p2 = Bls12_381::pairing(U, h);
         Ok(TPKECipherText {
             U: U, V: V, W: W
         })
     }
 
-    fn verify_ciphertext(&self, c: TPKECipherText) -> bool {
-        unimplemented!();
+  fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
+        let h = hashH(c.U, &c.V);
+        let p1 = Bls12_381::pairing(self.g1, c.W);
+        let p2 = Bls12_381::pairing(c.U, h);
+        assert_eq!(p1, p2); // FIXME
+        p1 == p2
     }
 
-    fn verify_share(&self, i: Fr, Ui: u64, c: TPKECipherText) -> bool {
-        unimplemented!();
+    fn verify_share(&self, i: u64, Ui: G1, c: &TPKECipherText) -> bool {
+        if i <= 0 || i > self.l { return false; }
+        let yi = self.VKs[i as usize];
+        let p1 = Bls12_381::pairing(Ui, self.g2);
+        let p2 = Bls12_381::pairing(c.U, yi);
+        p1 == p2
     }
 
-    fn combine_shares(&self, c: TPKECipherText, shares: &[Fr]) -> Vec<u8> {
-        unimplemented!();
+    fn combine_shares(&self, c: &TPKECipherText, shares: HashMap<u64, G1>) -> Result<Vec<u8>, TPKEError> {
+        if !self.verify_ciphertext(c) {
+            return Err(TPKEError::InvalidCiphertext);
+        }
+        let mut r = hash_to_G1(b"bzte-id");
+        let indices: Vec<u64> = shares.keys().map(|i| *i).collect();
+        for (j, share) in shares.iter() {
+            if !self.verify_share(*j, *share, c) {
+                return Err(TPKEError::InvalidShare);
+            }
+        }
+        r = shares.iter().map(|(k, v)| {
+            v.mul(self.lagrange(&indices, *k).unwrap().into_repr())
+        }).fold(r, |acc, x| {
+            acc.add(x)
+        });
+        let mut ret = Vec::new();
+        r.serialize(&mut ret);
+        for i in 0..ret.len() {
+            ret[i] ^= c.V[i];
+        }
+        Ok(ret)
     }
 }
 impl TPKEPrivateKey {
@@ -180,14 +220,39 @@ fn hashH(g: G1, x: &[u8]) -> G2 {
     hash_to_G2(&serialized)
 }
 
+pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
+        let mut rng = rand::thread_rng();
+        let a = vec![Fr::rand(&mut rng); k.try_into().unwrap()];
+        let sk = a[0];
+        let eval = | x: u64 | {
+            let mut y = Fr::zero();
+            let mut xx = Fr::one();
+            for coeff in a.clone() { // FIXME
+                y = y.add(Fr::from(xx).mul(Fr::from(coeff)));
+                xx = xx.mul(Fr::from(x));
+            }
+            return y;
+        };
+        let SKs: Vec<Fr> = (1..k+1).map(eval).collect();
+        assert_eq!(eval(0), sk);
+
+        let g2 = hash_to_G2(b"bzte-g2");
+        let VK = g2.mul(sk.into_repr());
+        let VKs: Vec<G2> = SKs.iter().map(|x| { g2.mul(x.into_repr()) }).collect();
+        
+        let tpk = TPKEPublicKey::new(l, k, VK, &VKs);
+        let tsks = SKs.iter().map(|x| { TPKEPrivateKey::new(tpk.clone(), x.clone()) }).collect();
+        (tpk, tsks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn it_works() {
-        let mut rng = rand::thread_rng();
-        let vpk = G1::rand(&mut rng);
-        let vpks = vec![G1::rand(&mut rng); 10];
-        let pk = super::TPKEPublicKey::new(5, 10, vpk, &vpks);
+        let (pk, sks) = keygen(10, 5);
+        let m = sha256(b"thats my kung fu");
+        let C = pk.encrypt(&m).unwrap();
+        assert!(pk.verify_ciphertext(&C));
     }
 }
