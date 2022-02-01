@@ -25,20 +25,20 @@ fn hash_to_G1(b: &[u8]) -> G1 {
     loop {
         let c = [b"bzte-domain-g1", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
         match G1Affine::from_random_bytes(&sha256(&c)) {
-            Some(v) => return G1::from(v),
+            Some(v) => return v.mul_by_cofactor_to_projective(),
             None => nonce += 1
         }
     }
 }
 
 fn hash_to_G2(b: &[u8]) -> G2 {
+    let mut rng = rand::thread_rng();
     let mut nonce = 0u32;
     loop {
         let c = [b"bzte-domain-g2", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
         match G2Affine::from_random_bytes(&sha256(&c)) {
-            Some(v) => return G2::from(v),
+            Some(v) => return v.mul_by_cofactor_to_projective(),
             None => nonce += 1
-
         }
     }
 }
@@ -84,10 +84,11 @@ impl fmt::Display for TPKEError {
         }
     }
 }
+
 impl TPKEPublicKey {
     pub fn new(l: u64, k: u64, VK: G2, VKs: &[G2]) -> Self {
-        let g1 = hash_to_G1(b"bzte-g1");
-        let g2 = hash_to_G2(b"bzte-g2");
+        let g1 = hash_to_G1(b"generator");
+        let g2 = hash_to_G2(b"generator");
 
         Self {
             g1: g1,
@@ -139,6 +140,7 @@ impl TPKEPublicKey {
 
         Ok(num.div(den))
     }
+
     pub fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
         if m.len() != 32 { return Err(TPKEError::InvalidLength); }
         let mut rng = rand::thread_rng();
@@ -160,35 +162,35 @@ impl TPKEPublicKey {
         })
     }
 
-  fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
+    fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
         let h = hashH(c.U, &c.V);
         let p1 = Bls12_381::pairing(self.g1, c.W);
         let p2 = Bls12_381::pairing(c.U, h);
-        assert_eq!(p1, p2); // FIXME
         p1 == p2
     }
 
-    fn verify_share(&self, i: u64, Ui: G1, c: &TPKECipherText) -> bool {
-        if i <= 0 || i > self.l { return false; }
-        let yi = self.VKs[i as usize];
+    fn verify_share(&self, i: usize, Ui: G1, c: &TPKECipherText) -> bool {
+        if i < 0usize || i > self.l.try_into().unwrap() { return false; }
+        let yi = self.VKs[i];
         let p1 = Bls12_381::pairing(Ui, self.g2);
         let p2 = Bls12_381::pairing(c.U, yi);
+        println!("{}", p1 == p2);
         p1 == p2
     }
 
-    fn combine_shares(&self, c: &TPKECipherText, shares: HashMap<u64, G1>) -> Result<Vec<u8>, TPKEError> {
+    fn combine_shares(&self, c: &TPKECipherText, shares: HashMap<usize, G1>) -> Result<Vec<u8>, TPKEError> {
         if !self.verify_ciphertext(c) {
             return Err(TPKEError::InvalidCiphertext);
         }
         let mut r = hash_to_G1(b"bzte-id");
-        let indices: Vec<u64> = shares.keys().map(|i| *i).collect();
+        let indices: Vec<u64> = shares.keys().map(|i| (*i).try_into().unwrap()).collect();
         for (j, share) in shares.iter() {
             if !self.verify_share(*j, *share, c) {
                 return Err(TPKEError::InvalidShare);
             }
         }
         r = shares.iter().map(|(k, v)| {
-            v.mul(self.lagrange(&indices, *k).unwrap().into_repr())
+            v.mul(self.lagrange(&indices, (*k).try_into().unwrap()).unwrap().into_repr())
         }).fold(r, |acc, x| {
             acc.add(x)
         });
@@ -200,6 +202,7 @@ impl TPKEPublicKey {
         Ok(ret)
     }
 }
+
 impl TPKEPrivateKey {
     fn new(pk: TPKEPublicKey, sk: Fr) -> Self {
         Self {
@@ -208,8 +211,11 @@ impl TPKEPrivateKey {
         }
     }
 
-    fn decrypt_share(&self, c: TPKECipherText) -> G1 {
-        return  c.U.mul(&self.sk.into_repr());
+    fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
+        match self.pk.verify_ciphertext(c) {
+            true => Ok(c.U.mul(&self.sk.into_repr())),
+            false => Err(TPKEError::InvalidCiphertext)
+        }
     }
 }
 
@@ -221,28 +227,28 @@ fn hashH(g: G1, x: &[u8]) -> G2 {
 }
 
 pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
-        let mut rng = rand::thread_rng();
-        let a = vec![Fr::rand(&mut rng); k.try_into().unwrap()];
-        let sk = a[0];
-        let eval = | x: u64 | {
-            let mut y = Fr::zero();
-            let mut xx = Fr::one();
-            for coeff in a.clone() { // FIXME
-                y = y.add(Fr::from(xx).mul(Fr::from(coeff)));
-                xx = xx.mul(Fr::from(x));
-            }
-            return y;
-        };
-        let SKs: Vec<Fr> = (1..k+1).map(eval).collect();
-        assert_eq!(eval(0), sk);
+    let mut rng = rand::thread_rng();
+    let a = vec![Fr::rand(&mut rng); k.try_into().unwrap()];
+    let sk = a[0];
+    let eval = | x: u64 | {
+        let mut y = Fr::zero();
+        let mut xx = Fr::one();
+        for coeff in a.clone() { // FIXME
+            y = y.add(Fr::from(xx).mul(Fr::from(coeff)));
+            xx = xx.mul(Fr::from(x));
+        }
+        return y;
+    };
+    let SKs: Vec<Fr> = (1..k+1).map(eval).collect();
+    assert_eq!(eval(0), sk);
 
-        let g2 = hash_to_G2(b"bzte-g2");
-        let VK = g2.mul(sk.into_repr());
-        let VKs: Vec<G2> = SKs.iter().map(|x| { g2.mul(x.into_repr()) }).collect();
-        
-        let tpk = TPKEPublicKey::new(l, k, VK, &VKs);
-        let tsks = SKs.iter().map(|x| { TPKEPrivateKey::new(tpk.clone(), x.clone()) }).collect();
-        (tpk, tsks)
+    let g2 = hash_to_G2(b"bzte-g2");
+    let VK = g2.mul(sk.into_repr());
+    let VKs: Vec<G2> = SKs.iter().map(|x| { g2.mul(x.into_repr()) }).collect();
+
+    let tpk = TPKEPublicKey::new(l, k, VK, &VKs);
+    let tsks = SKs.iter().map(|x| { TPKEPrivateKey::new(tpk.clone(), x.clone()) }).collect();
+    (tpk, tsks)
 }
 
 #[cfg(test)]
@@ -254,5 +260,9 @@ mod tests {
         let m = sha256(b"thats my kung fu");
         let C = pk.encrypt(&m).unwrap();
         assert!(pk.verify_ciphertext(&C));
+        let shares = sks.iter().map(|sk| { sk.decrypt_share(&C).unwrap() });
+        for (i, share) in shares.enumerate() {
+            assert!(pk.verify_share(i, share, &C));
+        }
     }
 }
