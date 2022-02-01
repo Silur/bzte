@@ -1,11 +1,10 @@
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective as G1, G2Affine, G2Projective as G2};
 use ark_ec::PairingEngine;
 use ark_ec::{AffineCurve, ProjectiveCurve};
-use ark_ff::{Field, FromBytes, One, PrimeField, Zero};
+use ark_ff::{FromBytes, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::UniformRand;
 use sha2::Digest;
-use std::collections::hash_set::HashSet;
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -16,11 +15,10 @@ use std::{
 fn sha256(b: &[u8]) -> Vec<u8> {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b);
-    let ret = hasher.finalize().to_vec();
-    ret
+    hasher.finalize().to_vec()
 }
 
-fn hash_to_G1(b: &[u8]) -> G1 {
+fn hash_to_g1(b: &[u8]) -> G1 {
     let mut nonce = 0u32;
     loop {
         let c = [b"bzte-domain-g1", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
@@ -34,8 +32,7 @@ fn hash_to_G1(b: &[u8]) -> G1 {
     }
 }
 
-fn hash_to_G2(b: &[u8]) -> G2 {
-    let mut rng = rand::thread_rng();
+fn hash_to_g2(b: &[u8]) -> G2 {
     let mut nonce = 0u32;
     loop {
         let c = [b"bzte-domain-g2", b, b"bzte-sep", &nonce.to_be_bytes()].concat();
@@ -55,8 +52,8 @@ pub struct TPKEPublicKey {
     k: u64,
     g1: G1,
     g2: G2,
-    VK: G2,
-    VKs: Vec<G2>,
+    vk: G2,
+    vks: Vec<G2>,
 }
 
 #[derive(Debug)]
@@ -68,9 +65,9 @@ pub struct TPKEPrivateKey {
 
 #[derive(Debug, Clone)]
 pub struct TPKECipherText {
-    U: G1,
-    V: Vec<u8>,
-    W: G2,
+    u: G1,
+    v: Vec<u8>,
+    w: G2,
 }
 
 #[derive(Debug)]
@@ -80,7 +77,9 @@ pub enum TPKEError {
     InvalidCiphertext,
     InvalidShare,
 }
+
 impl std::error::Error for TPKEError {}
+
 impl fmt::Display for TPKEError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -93,17 +92,17 @@ impl fmt::Display for TPKEError {
 }
 
 impl TPKEPublicKey {
-    pub fn new(l: u64, k: u64, VK: G2, VKs: &[G2]) -> Self {
-        let g1 = hash_to_G1(b"generator");
-        let g2 = hash_to_G2(b"generator");
+    pub fn new(l: u64, k: u64, vk: G2, vks: &[G2]) -> Self {
+        let g1 = hash_to_g1(b"generator");
+        let g2 = hash_to_g2(b"generator");
 
         Self {
             g1: g1,
             g2: g2,
             l: l,
             k: k,
-            VK: VK,
-            VKs: VKs.to_vec(),
+            vk: vk,
+            vks: vks.to_vec(),
         }
     }
 
@@ -112,7 +111,7 @@ impl TPKEPublicKey {
             return Err(TPKEError::InvalidLength);
         }
         let mut sorted = indices.to_vec();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         if sorted.len() != indices.len() {
             return Err(TPKEError::InvalidValue);
@@ -155,36 +154,36 @@ impl TPKEPublicKey {
         }
         let mut rng = rand::thread_rng();
         let r = Fr::rand(&mut rng).into_repr();
-        let U = self.g1.mul(r);
-        let VKr = Bls12_381::pairing(self.g1, self.VK.mul(r));
-        let mut V = Vec::new();
-        VKr.serialize(&mut V).unwrap();
-        V = sha256(&V);
+        let u = self.g1.mul(r);
+        let vkr = Bls12_381::pairing(self.g1, self.vk.mul(r));
+        let mut v = Vec::new();
+        vkr.serialize(&mut v).unwrap();
+        v = sha256(&v);
         for i in 0..32 {
-            V[i] ^= m[i];
+            v[i] ^= m[i];
         }
-        let h = hashH(U, &V);
-        let W = h.mul(r);
-        // let p1 = Bls12_381::pairing(self.g1, W);
-        // let p2 = Bls12_381::pairing(U, h);
+        let h = hash_h(u, &v);
+        let w = h.mul(r);
+        // let p1 = Bls12_381::pairing(self.g1, w);
+        // let p2 = Bls12_381::pairing(u, h);
         // assert_eq!(p1, p2);
-        Ok(TPKECipherText { U: U, V: V, W: W })
+        Ok(TPKECipherText { u: u, v: v, w: w })
     }
 
     fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
-        let h = hashH(c.U, &c.V);
-        let p1 = Bls12_381::pairing(self.g1, c.W);
-        let p2 = Bls12_381::pairing(c.U, h);
+        let h = hash_h(c.u, &c.v);
+        let p1 = Bls12_381::pairing(self.g1, c.w);
+        let p2 = Bls12_381::pairing(c.u, h);
         p1 == p2
     }
 
-    fn verify_share(&self, i: usize, Ui: G1, c: &TPKECipherText) -> bool {
-        if i < 0usize || i > self.l.try_into().unwrap() {
+    fn verify_share(&self, i: usize, ui: G1, c: &TPKECipherText) -> bool {
+        if i > self.l.try_into().unwrap() {
             return false;
         }
-        let yi = self.VKs[i];
-        let p1 = Bls12_381::pairing(Ui, self.g2);
-        let p2 = Bls12_381::pairing(c.U, yi);
+        let yi = self.vks[i];
+        let p1 = Bls12_381::pairing(ui, self.g2);
+        let p2 = Bls12_381::pairing(c.u, yi);
         p1 == p2
     }
 
@@ -216,16 +215,17 @@ impl TPKEPublicKey {
             self.g2,
         );
         let mut ret = Vec::new();
-        r.serialize(&mut ret);
+        r.serialize(&mut ret).unwrap();
         ret = sha256(&ret);
-        for i in 0..32 {
-            ret[i] ^= c.V[i];
+        for (i, ri) in ret.iter_mut().enumerate().take(32) {
+            *ri ^= c.v[i];
         }
         Ok(ret)
     }
 }
 
 impl TPKEPrivateKey {
+
     fn new(pk: TPKEPublicKey, sk: Fr, i: usize) -> Self {
         Self {
             pk: pk,
@@ -236,17 +236,17 @@ impl TPKEPrivateKey {
 
     fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
         match self.pk.verify_ciphertext(c) {
-            true => Ok(c.U.mul(&self.sk.into_repr())),
+            true => Ok(c.u.mul(&self.sk.into_repr())),
             false => Err(TPKEError::InvalidCiphertext),
         }
     }
 }
 
-fn hashH(g: G1, x: &[u8]) -> G2 {
+fn hash_h(g: G1, x: &[u8]) -> G2 {
     let mut serialized = Vec::new();
     g.serialize(&mut serialized).unwrap();
     serialized.extend_from_slice(x);
-    hash_to_G2(&serialized)
+    hash_to_g2(&serialized)
 }
 
 pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
@@ -258,22 +258,22 @@ pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
         let mut xx = Fr::one();
         for coeff in a.clone() {
             // FIXME
-            y = y.add(Fr::from(xx).mul(Fr::from(coeff)));
+            y = y.add(xx.mul(coeff));
             xx = xx.mul(Fr::from(x));
         }
-        return y;
+        y
     };
-    let SKs: Vec<Fr> = (1..l + 1).map(eval).collect();
+    let sks: Vec<Fr> = (1..l + 1).map(eval).collect();
 
-    let g2 = hash_to_G2(b"generator");
-    let VK = g2.mul(sk.into_repr());
-    let VKs: Vec<G2> = SKs.iter().map(|x| g2.mul(x.into_repr())).collect();
+    let g2 = hash_to_g2(b"generator");
+    let vk = g2.mul(sk.into_repr());
+    let vks: Vec<G2> = sks.iter().map(|x| g2.mul(x.into_repr())).collect();
 
-    let tpk = TPKEPublicKey::new(l, k, VK, &VKs);
-    let tsks = SKs
+    let tpk = TPKEPublicKey::new(l, k, vk, &vks);
+    let tsks = sks
         .iter()
         .enumerate()
-        .map(|(i, x)| TPKEPrivateKey::new(tpk.clone(), x.clone(), i))
+        .map(|(i, x)| TPKEPrivateKey::new(tpk.clone(), *x, i))
         .collect();
 
     /* let indices: Vec<u64> = (0..k).collect();
@@ -293,21 +293,21 @@ mod tests {
     fn it_works() {
         let (pk, sks) = keygen(10, 5);
         let m = sha256(b"thats my kung fu");
-        let C = pk.encrypt(&m).unwrap();
-        assert!(pk.verify_ciphertext(&C));
-        let shares: Vec<G1> = sks.iter().map(|sk| sk.decrypt_share(&C).unwrap()).collect();
+        let c = pk.encrypt(&m).unwrap();
+        assert!(pk.verify_ciphertext(&c));
+        let shares: Vec<G1> = sks.iter().map(|sk| sk.decrypt_share(&c).unwrap()).collect();
         for (i, share) in shares.iter().enumerate() {
-            assert!(pk.verify_share(i, *share, &C));
+            assert!(pk.verify_share(i, *share, &c));
         }
 
         let mut partial_shares: HashMap<usize, G1> = HashMap::new();
         for i in 0..5 {
             partial_shares.insert(i, shares[i]);
         }
-        let check = pk.combine_shares(&C, &partial_shares).unwrap();
+        let check = pk.combine_shares(&c, &partial_shares).unwrap();
         assert_eq!(check, m);
 
         partial_shares.insert(1, shares.get(1).unwrap().double());
-        assert!(pk.combine_shares(&C, &partial_shares).is_err());
+        assert!(pk.combine_shares(&c, &partial_shares).is_err());
     }
 }
