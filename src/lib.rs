@@ -6,11 +6,39 @@ use ark_ff::{Field, PrimeField, Zero, One, FromBytes};
 use ark_bls12_381::{G1Projective as G1, G1Affine, G2Affine, G2Projective as G2, Fr};
 use std::collections::hash_set::HashSet;
 use sha2::Digest;
+use ark_crypto_primitives::crh::{
+        pedersen::{Window, CRH},
+            CRH as CRHScheme,
+};
 
 fn sha256(b: &[u8]) -> Vec<u8> {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b);
-    hasher.finalize().to_vec()
+    let ret = hasher.finalize().to_vec();
+    ret
+}
+
+fn hash_to_G1(b: &[u8]) -> G1 {
+    let mut nonce = 0u32;
+    loop {
+        let c = [b"bzte-domain-g1", b, &nonce.to_be_bytes()].concat();
+        match G1Affine::from_random_bytes(&sha256(&c)) {
+            Some(v) => return G1::from(v),
+            None => nonce += 1
+        }
+    }
+}
+
+fn hash_to_G2(b: &[u8]) -> G2 {
+    let mut nonce = 0u32;
+    loop {
+        let c = [b"bzte-domain-g2", b, &nonce.to_be_bytes()].concat();
+        match G2Affine::from_random_bytes(&sha256(&c)) {
+            Some(v) => return G2::from(v),
+            None => nonce += 1
+
+        }
+    }
 }
 
 pub struct TPKEPublicKey {
@@ -49,8 +77,8 @@ impl fmt::Display for TPKEError {
 }
 impl TPKEPublicKey {
     fn new(l: u64, k: u64, VK: G1, VKs: &[G1]) -> Self {
-        let g1 = G1::from(G1Affine::from_random_bytes(&sha256(b"bzte-g1")).unwrap());
-        let g2 = G2::from(G2Affine::from_random_bytes(&sha256(b"bzte-g2")).unwrap());
+        let g1 = hash_to_G1(b"bzte-g1");
+        let g2 = hash_to_G2(b"bzte-g2");
 
         Self {
             g1: g1,
@@ -149,16 +177,17 @@ fn hashH(g: G1, x: &[u8]) -> G2 {
     let mut serialized = Vec::new();
     g.serialize(&mut serialized);
     serialized.extend_from_slice(x);
-    G2::from(
-        G2Affine::from_random_bytes(&serialized).unwrap()
-        )
+    hash_to_G2(&serialized)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
     fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
+        let mut rng = rand::thread_rng();
+        let vpk = G1::rand(&mut rng);
+        let vpks = vec![G1::rand(&mut rng); 10];
+        let pk = super::TPKEPublicKey::new(5, 10, vpk, &vpks);
     }
 }
