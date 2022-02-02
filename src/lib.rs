@@ -1,8 +1,8 @@
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective as G1, G2Affine, G2Projective as G2};
 use ark_ec::PairingEngine;
 use ark_ec::{AffineCurve, ProjectiveCurve};
-use ark_ff::{FromBytes, One, PrimeField, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_ff::{One, PrimeField, Zero};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::UniformRand;
 use sha2::Digest;
 use std::{
@@ -46,7 +46,7 @@ fn hash_to_g2(b: &[u8]) -> G2 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TPKEPublicKey {
     l: u64,
     k: u64,
@@ -56,14 +56,14 @@ pub struct TPKEPublicKey {
     vks: Vec<G2>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TPKEPrivateKey {
     pk: TPKEPublicKey,
     sk: Fr,
-    index: usize,
+    index: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TPKECipherText {
     u: G1,
     v: Vec<u8>,
@@ -170,14 +170,14 @@ impl TPKEPublicKey {
         Ok(TPKECipherText { u: u, v: v, w: w })
     }
 
-    fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
+    pub fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
         let h = hash_h(c.u, &c.v);
         let p1 = Bls12_381::pairing(self.g1, c.w);
         let p2 = Bls12_381::pairing(c.u, h);
         p1 == p2
     }
 
-    fn verify_share(&self, i: usize, ui: G1, c: &TPKECipherText) -> bool {
+    pub fn verify_share(&self, i: usize, ui: G1, c: &TPKECipherText) -> bool {
         if i > self.l.try_into().unwrap() {
             return false;
         }
@@ -187,7 +187,7 @@ impl TPKEPublicKey {
         p1 == p2
     }
 
-    fn combine_shares(
+    pub fn combine_shares(
         &self,
         c: &TPKECipherText,
         shares: &HashMap<usize, G1>,
@@ -222,11 +222,44 @@ impl TPKEPublicKey {
         }
         Ok(ret)
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        let mut r = Vec::new();
+        r.extend_from_slice(&self.l.to_be_bytes());
+        r.extend_from_slice(&self.k.to_be_bytes());
+        let mut b = Vec::new();
+        self.g1.serialize(&mut b)?;
+        r.append(&mut b);
+        self.g2.serialize(&mut b)?;
+        r.append(&mut b);
+        self.vk.serialize(&mut b)?;
+        r.append(&mut b);
+        for vk in self.vks.iter() {
+            vk.serialize(&mut b)?;
+            r.append(&mut b);
+        }
+        Ok(r)
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
+        let mut i = 0usize;
+        let l = u64::from_be_bytes(b[i..i+8].try_into().unwrap()); i+=8;
+        let k = u64::from_be_bytes(b[i..i+8].try_into().unwrap()); i+=8;
+        let g1: G1 = G1::deserialize(&b[i..i+48])?; i+=48;
+        let g2: G2 = G2::deserialize(&b[i..i+96])?; i+=96;
+        let vk: G2 = G2::deserialize(&b[i..i+96])?; i+=96;
+        let mut vks: Vec<G2> = Vec::new();
+        for _ in 0..l {
+            vks.push(G2::deserialize(&b[i..i+96])?);
+            i+=96;
+        }
+        Ok(Self{ l, k, g1, g2, vk, vks })
+    }
 }
 
 impl TPKEPrivateKey {
 
-    fn new(pk: TPKEPublicKey, sk: Fr, i: usize) -> Self {
+    pub fn new(pk: TPKEPublicKey, sk: Fr, i: u64) -> Self {
         Self {
             pk: pk,
             sk: sk,
@@ -234,11 +267,51 @@ impl TPKEPrivateKey {
         }
     }
 
-    fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
+    pub fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
         match self.pk.verify_ciphertext(c) {
             true => Ok(c.u.mul(&self.sk.into_repr())),
             false => Err(TPKEError::InvalidCiphertext),
         }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        let mut r = self.pk.to_bytes()?;
+        let mut b: Vec<u8> = Vec::new();
+        self.sk.serialize(&mut b)?;
+        r.append(&mut b);
+        r.extend_from_slice(&self.index.to_be_bytes());
+        Ok(r)
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
+        let mut i = 0usize;
+        let pk = TPKEPublicKey::from_bytes(&b[i..i+1216])?; i+=1216;
+        let sk = Fr::deserialize(&b[i..i+32])?; i+=32;
+        let i = u64::from_be_bytes(b[i..i+8].try_into().unwrap());
+        Ok(Self{ pk, sk, index: i})
+    }
+}
+
+impl TPKECipherText {
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        let mut r: Vec<u8> = Vec::new();
+        let mut b: Vec<u8> = Vec::new();
+        self.u.serialize(&mut b)?;
+        r.append(&mut b);
+        self.w.serialize(&mut b)?;
+        r.append(&mut b);
+        b = self.v.clone();
+        r.append(&mut b);
+        Ok(r)
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
+        let mut i = 0usize;
+        let u = G1::deserialize(&b[i..i+48]).unwrap(); i+=48;
+        let w = G2::deserialize(&b[i..i+96]).unwrap(); i+=96;
+        let v: Vec<u8> = b[i..i+32].to_vec();
+        Ok(Self{ u, v, w})
     }
 }
 
@@ -257,7 +330,6 @@ pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
         let mut y = Fr::zero();
         let mut xx = Fr::one();
         for coeff in a.clone() {
-            // FIXME
             y = y.add(xx.mul(coeff));
             xx = xx.mul(Fr::from(x));
         }
@@ -273,7 +345,7 @@ pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
     let tsks = sks
         .iter()
         .enumerate()
-        .map(|(i, x)| TPKEPrivateKey::new(tpk.clone(), *x, i))
+        .map(|(i, x)| TPKEPrivateKey::new(tpk.clone(), *x, i.try_into().unwrap()))
         .collect();
 
     /* let indices: Vec<u64> = (0..k).collect();
@@ -309,5 +381,17 @@ mod tests {
 
         partial_shares.insert(1, shares.get(1).unwrap().double());
         assert!(pk.combine_shares(&c, &partial_shares).is_err());
+
+        let pk_serialized = pk.to_bytes().unwrap();
+        let pk_deserialized = TPKEPublicKey::from_bytes(&pk_serialized).unwrap();
+        assert_eq!(pk, pk_deserialized);
+
+        let sk_serialized = sks[0].to_bytes().unwrap();
+        let sk_deserialized = TPKEPrivateKey::from_bytes(&sk_serialized).unwrap();
+        assert_eq!(sks[0], sk_deserialized);
+
+        let c_serialized = c.to_bytes().unwrap();
+        let c_deserialized = TPKECipherText::from_bytes(&c_serialized).unwrap();
+        assert_eq!(c, c_deserialized);
     }
 }
