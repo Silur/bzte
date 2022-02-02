@@ -1,7 +1,12 @@
 [package]
 name = "bzte"
+description = "Baek-Zheng threshold cryptosystem on top of BLS12-381"
+documentation = "https://docs.rs/bzte"
+repository = "https://github.com/Silur/bzte"
+homepage = "https://github.com/Silur/bzte"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
