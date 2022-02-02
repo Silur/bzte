@@ -47,6 +47,7 @@ fn hash_to_g2(b: &[u8]) -> G2 {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Holds the public key and generators for the TPKE scheme
 pub struct TPKEPublicKey {
     l: u64,
     k: u64,
@@ -57,6 +58,7 @@ pub struct TPKEPublicKey {
 }
 
 #[derive(Debug, PartialEq)]
+/// Holds the secret scalar and a copy of the public key of the TPKE scheme
 pub struct TPKEPrivateKey {
     pk: TPKEPublicKey,
     sk: Fr,
@@ -92,6 +94,8 @@ impl fmt::Display for TPKEError {
 }
 
 impl TPKEPublicKey {
+    /// creates a k-of-l threshold setup, where l keys are required out of
+    /// l to decrypt a message
     pub fn new(l: u64, k: u64, vk: G2, vks: &[G2]) -> Self {
         let g1 = hash_to_g1(b"generator");
         let g2 = hash_to_g2(b"generator");
@@ -148,6 +152,7 @@ impl TPKEPublicKey {
         Ok(num.div(den))
     }
 
+    /// encrypts the message to a given public key
     pub fn encrypt(&self, m: &[u8]) -> Result<TPKECipherText, TPKEError> {
         if m.len() != 32 {
             return Err(TPKEError::InvalidLength);
@@ -170,6 +175,7 @@ impl TPKEPublicKey {
         Ok(TPKECipherText { u: u, v: v, w: w })
     }
 
+    /// verify that the pairings inside the ciphertexts add up
     pub fn verify_ciphertext(&self, c: &TPKECipherText) -> bool {
         let h = hash_h(c.u, &c.v);
         let p1 = Bls12_381::pairing(self.g1, c.w);
@@ -177,6 +183,7 @@ impl TPKEPublicKey {
         p1 == p2
     }
 
+    /// verify that the shares given as parameter are valid
     pub fn verify_share(&self, i: usize, ui: G1, c: &TPKECipherText) -> bool {
         if i > self.l.try_into().unwrap() {
             return false;
@@ -187,6 +194,7 @@ impl TPKEPublicKey {
         p1 == p2
     }
 
+    /// decrypts a message using the provided key shares
     pub fn combine_shares(
         &self,
         c: &TPKECipherText,
@@ -223,6 +231,7 @@ impl TPKEPublicKey {
         Ok(ret)
     }
 
+    /// serializes the public key
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
         let mut r = Vec::new();
         r.extend_from_slice(&self.l.to_be_bytes());
@@ -241,24 +250,37 @@ impl TPKEPublicKey {
         Ok(r)
     }
 
+    /// create a public key from a byte slice
     pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
         let mut i = 0usize;
-        let l = u64::from_be_bytes(b[i..i+8].try_into().unwrap()); i+=8;
-        let k = u64::from_be_bytes(b[i..i+8].try_into().unwrap()); i+=8;
-        let g1: G1 = G1::deserialize(&b[i..i+48])?; i+=48;
-        let g2: G2 = G2::deserialize(&b[i..i+96])?; i+=96;
-        let vk: G2 = G2::deserialize(&b[i..i+96])?; i+=96;
+        let l = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        i += 8;
+        let k = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        i += 8;
+        let g1: G1 = G1::deserialize(&b[i..i + 48])?;
+        i += 48;
+        let g2: G2 = G2::deserialize(&b[i..i + 96])?;
+        i += 96;
+        let vk: G2 = G2::deserialize(&b[i..i + 96])?;
+        i += 96;
         let mut vks: Vec<G2> = Vec::new();
         for _ in 0..l {
-            vks.push(G2::deserialize(&b[i..i+96])?);
-            i+=96;
+            vks.push(G2::deserialize(&b[i..i + 96])?);
+            i += 96;
         }
-        Ok(Self{ l, k, g1, g2, vk, vks })
+        Ok(Self {
+            l,
+            k,
+            g1,
+            g2,
+            vk,
+            vks,
+        })
     }
 }
 
 impl TPKEPrivateKey {
-
+    /// create a new secret key for `pk`, with index `i`
     pub fn new(pk: TPKEPublicKey, sk: Fr, i: u64) -> Self {
         Self {
             pk: pk,
@@ -267,6 +289,7 @@ impl TPKEPrivateKey {
         }
     }
 
+    /// recover a ciphertext share locally
     pub fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
         match self.pk.verify_ciphertext(c) {
             true => Ok(c.u.mul(&self.sk.into_repr())),
@@ -285,15 +308,16 @@ impl TPKEPrivateKey {
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
         let mut i = 0usize;
-        let pk = TPKEPublicKey::from_bytes(&b[i..i+1216])?; i+=1216;
-        let sk = Fr::deserialize(&b[i..i+32])?; i+=32;
-        let i = u64::from_be_bytes(b[i..i+8].try_into().unwrap());
-        Ok(Self{ pk, sk, index: i})
+        let pk = TPKEPublicKey::from_bytes(&b[i..i + 1216])?;
+        i += 1216;
+        let sk = Fr::deserialize(&b[i..i + 32])?;
+        i += 32;
+        let i = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        Ok(Self { pk, sk, index: i })
     }
 }
 
 impl TPKECipherText {
-
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
         let mut r: Vec<u8> = Vec::new();
         let mut b: Vec<u8> = Vec::new();
@@ -308,10 +332,12 @@ impl TPKECipherText {
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
         let mut i = 0usize;
-        let u = G1::deserialize(&b[i..i+48]).unwrap(); i+=48;
-        let w = G2::deserialize(&b[i..i+96]).unwrap(); i+=96;
-        let v: Vec<u8> = b[i..i+32].to_vec();
-        Ok(Self{ u, v, w})
+        let u = G1::deserialize(&b[i..i + 48]).unwrap();
+        i += 48;
+        let w = G2::deserialize(&b[i..i + 96]).unwrap();
+        i += 96;
+        let v: Vec<u8> = b[i..i + 32].to_vec();
+        Ok(Self { u, v, w })
     }
 }
 
@@ -322,6 +348,8 @@ fn hash_h(g: G1, x: &[u8]) -> G2 {
     hash_to_g2(&serialized)
 }
 
+/// Creates a new k-of-l scheme, then returns the verifier public key
+/// and the correspondng shares
 pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
     let mut rng = rand::thread_rng();
     let a = vec![Fr::rand(&mut rng); k.try_into().unwrap()];
