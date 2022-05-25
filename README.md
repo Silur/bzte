@@ -5,7 +5,7 @@ a>
 <a href="https://docs.rs/bzte"><img src="https://img.shields.io/docsrs/bzte"></a>
 </p>
 
-## A rust implementation of the <a href="https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.119.1717&rep=rep1&type=pdf">Baek-Zhang threshold cryptosystem</a> on top of BLS12-381 using arkworks
+## A rust implementation of the <a href="https://cpb-us-w2.wpmucdn.com/sites.uab.edu/dist/a/68/files/2020/01/globecom03-p1491.pdf">Baek-Zhang threshold cryptosystem</a> on top of BLS12-381 using arkworks
 
 ## Why threshold encrypt?
 
