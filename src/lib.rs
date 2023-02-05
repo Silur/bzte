@@ -1,9 +1,9 @@
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective as G1, G2Affine, G2Projective as G2};
-use ark_ec::PairingEngine;
-use ark_ec::{AffineCurve, ProjectiveCurve};
+use ark_ec::{AffineRepr};
 use ark_ff::{One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::UniformRand;
+use ark_ec::pairing::Pairing;
 use sha2::Digest;
 use std::{
     cmp::Ordering,
@@ -25,7 +25,7 @@ fn hash_to_g1(b: &[u8]) -> G1 {
         match G1Affine::from_random_bytes(&sha256(&c)) {
             Some(v) => {
                 // if v.is_in_correct_subgroup_assuming_on_curve() { return v.into(); }
-                return v.mul_by_cofactor_to_projective();
+                return v.mul_by_cofactor_to_group();
             }
             None => nonce += 1,
         }
@@ -39,7 +39,7 @@ fn hash_to_g2(b: &[u8]) -> G2 {
         match G2Affine::from_random_bytes(&sha256(&c)) {
             Some(v) => {
                 // if v.is_in_correct_subgroup_assuming_on_curve() { return v.into(); }
-                return v.mul_by_cofactor_to_projective();
+                return v.mul_by_cofactor_to_group();
             }
             None => nonce += 1,
         }
@@ -158,11 +158,11 @@ impl TPKEPublicKey {
             return Err(TPKEError::InvalidLength);
         }
         let mut rng = rand::thread_rng();
-        let r = Fr::rand(&mut rng).into_repr();
+        let r = Fr::rand(&mut rng);
         let u = self.g1.mul(r);
         let vkr = Bls12_381::pairing(self.g1, self.vk.mul(r));
         let mut v = Vec::new();
-        vkr.serialize(&mut v).unwrap();
+        vkr.serialize_compressed(&mut v).unwrap();
         v = sha256(&v);
         for i in 0..32 {
             v[i] ^= m[i];
@@ -215,15 +215,14 @@ impl TPKEPublicKey {
                 .map(|(k, v)| {
                     v.mul(
                         self.lagrange(&indices, (*k).try_into().unwrap())
-                            .unwrap()
-                            .into_repr(),
+                            .unwrap(),
                     )
                 })
                 .fold(G1::zero(), |acc, x| acc.add(x)),
             self.g2,
         );
         let mut ret = Vec::new();
-        r.serialize(&mut ret).unwrap();
+        r.serialize_compressed(&mut ret).unwrap();
         ret = sha256(&ret);
         for (i, ri) in ret.iter_mut().enumerate().take(32) {
             *ri ^= c.v[i];
@@ -237,14 +236,14 @@ impl TPKEPublicKey {
         r.extend_from_slice(&self.l.to_be_bytes());
         r.extend_from_slice(&self.k.to_be_bytes());
         let mut b = Vec::new();
-        self.g1.serialize(&mut b)?;
+        self.g1.serialize_compressed(&mut b)?;
         r.append(&mut b);
-        self.g2.serialize(&mut b)?;
+        self.g2.serialize_compressed(&mut b)?;
         r.append(&mut b);
-        self.vk.serialize(&mut b)?;
+        self.vk.serialize_compressed(&mut b)?;
         r.append(&mut b);
         for vk in self.vks.iter() {
-            vk.serialize(&mut b)?;
+            vk.serialize_compressed(&mut b)?;
             r.append(&mut b);
         }
         Ok(r)
@@ -257,15 +256,15 @@ impl TPKEPublicKey {
         i += 8;
         let k = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
         i += 8;
-        let g1: G1 = G1::deserialize(&b[i..i + 48])?;
+        let g1: G1 = G1::deserialize_compressed(&b[i..i + 48])?;
         i += 48;
-        let g2: G2 = G2::deserialize(&b[i..i + 96])?;
+        let g2: G2 = G2::deserialize_compressed(&b[i..i + 96])?;
         i += 96;
-        let vk: G2 = G2::deserialize(&b[i..i + 96])?;
+        let vk: G2 = G2::deserialize_compressed(&b[i..i + 96])?;
         i += 96;
         let mut vks: Vec<G2> = Vec::new();
         for _ in 0..l {
-            vks.push(G2::deserialize(&b[i..i + 96])?);
+            vks.push(G2::deserialize_compressed(&b[i..i + 96])?);
             i += 96;
         }
         Ok(Self {
@@ -292,7 +291,7 @@ impl TPKEPrivateKey {
     /// recover a ciphertext share locally
     pub fn decrypt_share(&self, c: &TPKECipherText) -> Result<G1, TPKEError> {
         match self.pk.verify_ciphertext(c) {
-            true => Ok(c.u.mul(&self.sk.into_repr())),
+            true => Ok(c.u.mul(&self.sk)),
             false => Err(TPKEError::InvalidCiphertext),
         }
     }
@@ -300,7 +299,7 @@ impl TPKEPrivateKey {
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
         let mut r = self.pk.to_bytes()?;
         let mut b: Vec<u8> = Vec::new();
-        self.sk.serialize(&mut b)?;
+        self.sk.serialize_compressed(&mut b)?;
         r.append(&mut b);
         r.extend_from_slice(&self.index.to_be_bytes());
         Ok(r)
@@ -310,7 +309,7 @@ impl TPKEPrivateKey {
         let mut i = 0usize;
         let pk = TPKEPublicKey::from_bytes(&b[i..i + 1216])?;
         i += 1216;
-        let sk = Fr::deserialize(&b[i..i + 32])?;
+        let sk = Fr::deserialize_compressed(&b[i..i + 32])?;
         i += 32;
         let i = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
         Ok(Self { pk, sk, index: i })
@@ -321,9 +320,9 @@ impl TPKECipherText {
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerializationError> {
         let mut r: Vec<u8> = Vec::new();
         let mut b: Vec<u8> = Vec::new();
-        self.u.serialize(&mut b)?;
+        self.u.serialize_compressed(&mut b)?;
         r.append(&mut b);
-        self.w.serialize(&mut b)?;
+        self.w.serialize_compressed(&mut b)?;
         r.append(&mut b);
         b = self.v.clone();
         r.append(&mut b);
@@ -332,9 +331,9 @@ impl TPKECipherText {
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, SerializationError> {
         let mut i = 0usize;
-        let u = G1::deserialize(&b[i..i + 48]).unwrap();
+        let u = G1::deserialize_compressed(&b[i..i + 48]).unwrap();
         i += 48;
-        let w = G2::deserialize(&b[i..i + 96]).unwrap();
+        let w = G2::deserialize_compressed(&b[i..i + 96]).unwrap();
         i += 96;
         let v: Vec<u8> = b[i..i + 32].to_vec();
         Ok(Self { u, v, w })
@@ -343,7 +342,7 @@ impl TPKECipherText {
 
 fn hash_h(g: G1, x: &[u8]) -> G2 {
     let mut serialized = Vec::new();
-    g.serialize(&mut serialized).unwrap();
+    g.serialize_compressed(&mut serialized).unwrap();
     serialized.extend_from_slice(x);
     hash_to_g2(&serialized)
 }
@@ -366,8 +365,8 @@ pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
     let sks: Vec<Fr> = (1..l + 1).map(eval).collect();
 
     let g2 = hash_to_g2(b"generator");
-    let vk = g2.mul(sk.into_repr());
-    let vks: Vec<G2> = sks.iter().map(|x| g2.mul(x.into_repr())).collect();
+    let vk = g2.mul(sk);
+    let vks: Vec<G2> = sks.iter().map(|x| g2.mul(x)).collect();
 
     let tpk = TPKEPublicKey::new(l, k, vk, &vks);
     let tsks = sks
@@ -389,6 +388,7 @@ pub fn keygen(l: u64, k: u64) -> (TPKEPublicKey, Vec<TPKEPrivateKey>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ec::Group;
     #[test]
     fn it_works() {
         let (pk, sks) = keygen(10, 5);
