@@ -18,6 +18,6 @@ ark-ec = "0.4.0"
 sha2 = "0.10.6"
 hex = "0.4.3"
 rand = "0.8.5"
-ark-serialize = { version = "0.4", features = ["derive"] }
+ark-serialize = { version = "0.5", features = ["derive"] }
 ark-crypto-primitives = "0.4.0"
 serde = {version = "1.0.152", features = ["derive"]}
